@@ -1,10 +1,9 @@
-import aiofiles
+import re
 from gigachat import GigaChat
 import os
 import logging
 import datetime
 import json
-import smtplib
 import PyPDF2
 import telebot
 from dotenv import load_dotenv
@@ -38,7 +37,7 @@ def send_broadcast(message):
 
     for user_id in logs_dict:
         try:
-            bot.send_message(user_id, f"📢 *Сообщение от администратора:*\n\n{broadcast_message}", parse_mode="Markdown")
+            bot.send_message(user_id, f"📢\n{broadcast_message}", parse_mode="Markdown")
             sent_count += 1
         except Exception as e:
             logging.info(f"Не удалось отправить сообщение {user_id}: {e}")
@@ -62,8 +61,10 @@ def gigachat(text):
     prompt = (
         "Ты — эксперт по медицинским анализам. "
         "Твоя задача — анализировать результаты анализов и выдавать понятные "
-        "разъяснения. Твои ответы должны быть краткими, но информативными.\n\n"
+        "разъяснения.\n\n"
         "Если тебе задают вопрос не по теме, то не отвечай на него"
+        "Обязательно пиши свой вывод по результатам анализов под словом 'Вывод:'"
+        "Если выводишь результаты по анализам выводи перед выводом 'Расшифровка анализов:'"
     )
 
 
@@ -72,9 +73,21 @@ def gigachat(text):
     with GigaChat(
             credentials=os.getenv('API_KEY'),
             ca_bundle_file=ca_bundle_file) as giga:
-        response = giga.chat(full_text)
-        return response.choices[0].message.content
+            response = giga.chat(full_text)
+            return response.choices[0].message.content
 
+
+def send_message(message, result_text):
+
+    pattern_vi = re.compile(r'Вывод[а-я]*')
+    match = pattern_vi.search(result_text)
+
+    if match:
+        parts = result_text.split(match.group(0))
+        bot.send_message(message.chat.id, parts[0])
+        bot.send_message(message.chat.id, '🔎 ' + match.group(0) + parts[1])
+    else:
+        bot.send_message(message.chat.id, result_text)
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
@@ -100,7 +113,7 @@ def send_welcome(message):
         "(https://docs.google.com/document/d/1hOsAz2g--YBnQvQohbxa0Ybzb6oWH3aIAp796w7rgK4/edit?usp=sharing)"
     )
     if user_id in ADMIN_IDS:
-        bot.send_message(message.chat.id, "🔹 *Добро пожаловать в админ-панель!*", reply_markup=admin_keyboard(),
+        bot.send_message(message.chat.id, "🔹 *Добро пожаловать админ!*", reply_markup=admin_keyboard(),
                          parse_mode="Markdown")
     bot.send_message(message.chat.id, text)
 
@@ -124,6 +137,7 @@ def request_broadcast_message(message):
         bot.register_next_step_handler(message, send_broadcast)
     else:
         bot.send_message(message.chat.id, "⛔ У вас нет прав доступа!")
+
 
 # Обработчик загрузки PDF
 @bot.message_handler(content_types=["document"])
@@ -158,10 +172,10 @@ def handle_pdf(message):
             reader = PyPDF2.PdfReader(f)
             text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
 
-        bot.send_message(message.chat.id, "📄 Анализы загружены. Обрабатываю данные...")
-        result_text = f"🔎 Расшифровка анализов:\n\n{gigachat(text)}...\n\nБЛАГОДАРИМ ЗА ДОВЕРИЕ!"
-        bot.send_message(message.chat.id, result_text)
-
+        sent_message = bot.send_message(message.chat.id, "📄 Анализы загружены. Обрабатываю данные...")
+        result_text = f"{gigachat(text)}"
+        bot.delete_message(message.chat.id, sent_message.message_id)
+        send_message(message, result_text)
     except Exception as e:
         bot.send_message(message.chat.id, "❌ Ошибка обработки PDF. Попробуйте другой файл.")
         logging.error(f"Ошибка чтения PDF: {e}")
@@ -189,9 +203,10 @@ def handle_text(message):
     logs[user_id]["requests_today"] += 1
     save_logs(logs)
 
-    bot.send_message(message.chat.id, "📄 Обрабатываю данные...")
-    result_text = f"🔎 Расшифровка анализов:\n\n{gigachat(text=message.text)}...\n\nБЛАГОДАРИМ ЗА ДОВЕРИЕ!"
-    bot.send_message(message.chat.id, result_text)
+    sent_message = bot.send_message(message.chat.id, "📄 Обрабатываю данные...")
+    result_text = f"{gigachat(text=message.text)}"
+    bot.delete_message(message.chat.id, sent_message.message_id)
+    send_message(message, result_text)
 
 
 # Запуск бота
