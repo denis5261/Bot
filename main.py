@@ -1,399 +1,247 @@
-import re
-from gigachat import GigaChat
 import os
 import logging
 import datetime
-import json
+import time
+
 import PyPDF2
-import telebot
-from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram import Bot, Dispatcher, types, filters, F
+from aiogram.types import FSInputFile
+import asyncio
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 
+from settings import TOKEN, ADMIN_IDS, LOG_FILE, REQUEST_LIMIT_pdf, REQUEST_LIMIT_mes
+from utils import load_logs, save_logs, load_prompt, save_prompt, refact_res_mes, gigachat
 
-load_dotenv()
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
-bot = telebot.TeleBot(TOKEN)
-LOG_FILE = "requests_log.json"
-REQUEST_LIMIT = 20
 
-ADMIN_IDS = ['696933310']
+class Form(StatesGroup):
+    waiting_for_prompt = State()
+    waiting_for_send_message = State()
 
-# Функция загрузки логов
-def load_logs():
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+def admin_keyboard():
+    # Создаем клавиатуру с явным указанием поля `keyboard`
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            # Первая строка кнопок
+            [
+                KeyboardButton(text="📊 Отправить файл со статистикой"),
+                KeyboardButton(text="📢 Отправить сообщение всем пользователям"),
+            ],
+            # Вторая строка кнопок
+            [
+                KeyboardButton(text="🤖 Изменить промпт"),
+            ],
+        ],
+        resize_keyboard=True  # Автоматическое изменение размера клавиатуры
+    )
+    return keyboard
+
+@dp.message(filters.command.Command('start'))
+async def send_welcome(message: types.Message):
+    user_id = str(message.from_user.id)
+    logs = load_logs()
+    if user_id in ADMIN_IDS:
+        await message.answer("✨ADMIN панель доступна!✨", reply_markup=admin_keyboard())
+
+    if user_id not in logs:
+        logs[user_id] = {"requests_today_mes": 0, "requests_today_pdf": 0, "last_request_date": ""}
+    save_logs(logs)
+
+    text = ("✨ Доброго времени суток, друзья! ✨\n\n"
+            "🤖 Меня зовут Расшифровщик медицинских анализов\n"
+            "Я могу расшифровать ваши анализы, показать не просто цифры!\n\n"
+            "📄 Отправьте свои исследовательские данные или анализы в формате PDF или в виде сообщения, и уже через несколько секунд получите готовый результат.\n"
+            "⚠ Важно! ⚠\n"
+            "Напоминаю, что я не заменяю врача, а предоставляю только информационную услугу.\n"
+            "🔐 Пользуясь ботом, вы полностью принимаете политику обработки персональных данных:\n"
+            "[Политика обработки](https://docs.google.com/document/d/1hOsAz2g--YBnQvQohbxa0Ybzb6oWH3aIAp796w7rgK4)\n"
+            "❌ Действует лимит: по 5 PDF исследований в день."
+            )
+    await message.answer(text)
 
 
-def send_broadcast(message):
-    # Читаем словарь из логов
+@dp.message(F.text == "📊 Отправить файл со статистикой")
+async def send_logs(message: types.Message):
+    # Проверка, является ли пользователь администратором
+    if str(message.from_user.id) in ADMIN_IDS:
+        # Проверка существования файла
+        if os.path.exists(LOG_FILE):
+            # Отправка файла
+            await message.answer_document(document=FSInputFile(LOG_FILE))
+        else:
+            await message.answer("❌ Файл статистики не найден.")
+    else:
+        await message.answer("⛔ У вас нет прав доступа!")
+
+
+@dp.message(F.text == "📢 Отправить сообщение всем пользователям")
+async def request_broadcast_message(message: types.Message, state: FSMContext):
+    if str(message.from_user.id) in ADMIN_IDS:
+        markup = InlineKeyboardBuilder()
+        markup.button(text="✅ Да", callback_data="confirm_prompt")
+        markup.button(text="🚫 Отмена", callback_data="cancel_prompt")
+        await message.answer("🔑 Введите сообщение для рассылки всем пользователям:")
+        await state.set_state(Form.waiting_for_send_message)
+        #dp.register_message_handler(send_broadcast, state=None)
+    else:
+        await message.answer("⛔ У вас нет прав доступа!")
+
+
+
+@dp.message(F.text == "🤖 Изменить промпт")
+async def change_prompt(message: types.Message):
+    markup = InlineKeyboardBuilder()
+    markup.button(text="✅ Да", callback_data="confirm_prompt")
+    markup.button(text="🚫 Отмена", callback_data="cancel_prompt")
+
+
+    await message.answer(text=f"✅Установленный промпт:\n{load_prompt()}\n\nХотите изменить его?", reply_markup=markup.as_markup())
+
+
+@dp.message(Form.waiting_for_prompt)
+async def process_new_prompt(message: types.Message, state: FSMContext):
+
+    await message.answer(f"✅ {save_prompt(message)}")
+
+    await state.clear()
+
+
+@dp.message(Form.waiting_for_send_message)
+async def process_send_all_users_message(message: types.Message, state: FSMContext):
+    await state.update_data(message_text=message.text)
+    markup = InlineKeyboardBuilder()
+    markup.button(text="✅ Да", callback_data="confirm_message_all_users")
+    markup.button(text="🚫 Отмена", callback_data="cancel_message_all_users")
+    await message.answer(f"Отправить сообщение '{message.text}' всем пользователям?", reply_markup=markup.as_markup())
+
+
+@dp.callback_query(F.data == "confirm_message_all_users")
+async def confirm_prompt(callback_query: types.CallbackQuery, state: FSMContext):
+    await send_broadcast(callback_query.message, state)
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+    #await state.clear()
+
+
+@dp.callback_query(F.data == "cancel_message_all_users")
+async def confirm_prompt(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.answer('🚫 Действие отменено')
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+    await state.clear()
+
+
+@dp.callback_query(F.data == "confirm_prompt")
+async def confirm_prompt(callback_query: types.CallbackQuery, state: FSMContext):
+    # Ответ на нажатие "✅ Да"
+    await callback_query.answer()
+    await callback_query.message.answer("📩 Пожалуйста, отправьте новый промпт:")
+
+    # Убираем кнопки после ответа
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+
+    # Переводим бота в состояние ожидания нового промпта
+    await state.set_state(Form.waiting_for_prompt)
+
+
+@dp.callback_query(F.data == "cancel_prompt")
+async def cancel_prompt(callback_query: types.CallbackQuery):
+    await callback_query.message.answer("Изменение промпта отменено.")
+
+    # Убираем кнопки после ответа
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+
+async def send_broadcast(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    message_text = data.get("message_text")
     logs_dict = load_logs()
-
-    # Получаем сообщение от администратора
-    broadcast_message = message.text.strip()
-
     sent_count = 0
 
     for user_id in logs_dict:
         try:
-            bot.send_message(user_id, f"📢\n{broadcast_message}", parse_mode="Markdown")
+            await bot.send_message(user_id, f"{message_text}")
             sent_count += 1
         except Exception as e:
             logging.info(f"Не удалось отправить сообщение {user_id}: {e}")
 
-    bot.send_message(message.chat.id, f"✅ Сообщение отправлено {sent_count} пользователям.")
-
-# Функция сохранения логов
-def save_logs(logs):
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(logs, f, indent=4, ensure_ascii=False)
-
-def admin_keyboard():
-    keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row("📊 Отправить файл со статистикой", "📢 Отправить сообщение всем пользователям")
-    return keyboard
+    await message.answer(f"✅ Сообщение отправлено {sent_count} пользователям.")
+    await state.clear()
 
 
-def gigachat(text):
-    current_dir = os.path.dirname(os.path.abspath(__file__))  # Получаем текущую папку скрипта
-    ca_bundle_file = os.path.join(current_dir, "russian_trusted_root_ca.cer")
-    prompt = (
-        "Ты — эксперт по медицинским анализам. "
-        "Твоя задача — анализировать результаты анализов и выдавать понятные "
-        "разъяснения.\n\n"
-        "Если тебе задают вопрос не по теме, то не отвечай на него"
-        "Обязательно пиши свой вывод по результатам анализов под словом 'Вывод:'"
-        "Если выводишь результаты по анализам выводи перед выводом 'Расшифровка анализов:'"
-    )
-
-
-    full_text = prompt + text
-
-    with GigaChat(
-            credentials=os.getenv('API_KEY'),
-            ca_bundle_file=ca_bundle_file) as giga:
-            response = giga.chat(full_text)
-            return response.choices[0].message.content
-
-
-def send_message(message, result_text):
-
-    pattern_vi = re.compile(r'Вывод[а-я]*')
-    match = pattern_vi.search(result_text)
-
-    if match:
-        parts = result_text.split(match.group(0))
-        bot.send_message(message.chat.id, parts[0])
-        bot.send_message(message.chat.id, '🔎 ' + match.group(0) + parts[1])
-    else:
-        bot.send_message(message.chat.id, result_text)
-
-@bot.message_handler(commands=["start"])
-def send_welcome(message):
+@dp.message(F.document)
+async def handle_pdf(message: types.Message):
     user_id = str(message.from_user.id)
     logs = load_logs()
-
-    if user_id not in logs:
-        logs[user_id] = {"requests_today": 0, "last_request_date": ""}
-
-    save_logs(logs)
-
-    text = (
-        "✨ Доброго времени суток, друзья! ✨\n\n"
-        "🤖 Меня зовут *AnalysisObpproBot*.\n"
-        "Я помогу расшифровать ваши анализы и объяснить результаты простым языком.\n\n"
-        "📄 *Как воспользоваться ботом?*\n"
-        "🔹 Прикрепите PDF-файл с анализами или вставьте результаты в чат.\n"
-        "🔹 Я проанализирую их и предоставлю информационную справку.\n\n"
-        "⚠ *Важно!* ⚠\n"
-        "Этот бот не заменяет врача и предоставляет только информационные сведения.\n"
-        "💬 История переписки *не сохраняется* и остаётся только в вашем диалоговом окне.\n\n"
-        "🔐 *Пользуясь ботом, вы полностью принимаете политику обработки персональных данных:*\n"
-        "(https://docs.google.com/document/d/1hOsAz2g--YBnQvQohbxa0Ybzb6oWH3aIAp796w7rgK4/edit?usp=sharing)"
-    )
-    if user_id in ADMIN_IDS:
-        bot.send_message(message.chat.id, "🔹 *Добро пожаловать админ!*", reply_markup=admin_keyboard(),
-                         parse_mode="Markdown")
-    bot.send_message(message.chat.id, text)
-
-@bot.message_handler(func=lambda message: message.text == "📊 Отправить файл со статистикой")
-def send_logs(message):
-    if str(message.from_user.id) in ADMIN_IDS:
-        file_path = LOG_FILE
-
-        if os.path.exists(file_path):
-            with open(file_path, "rb") as file:
-                bot.send_document(message.chat.id, file)
-        else:
-            bot.send_message(message.chat.id, "❌ Файл статистики не найден.")
-    else:
-        bot.send_message(message.chat.id, "⛔ У вас нет прав доступа!")
-
-@bot.message_handler(func=lambda message: message.text == "📢 Отправить сообщение всем пользователям")
-def request_broadcast_message(message):
-    if str(message.from_user.id) in ADMIN_IDS:
-        bot.send_message(message.chat.id, "🔑 Введите сообщение для рассылки всем пользователям:")
-        bot.register_next_step_handler(message, send_broadcast)
-    else:
-        bot.send_message(message.chat.id, "⛔ У вас нет прав доступа!")
-
-
-# Обработчик загрузки PDF
-@bot.message_handler(content_types=["document"])
-def handle_pdf(message):
-    user_id = str(message.from_user.id)
-    logs = load_logs()
-
     today = datetime.datetime.now().strftime("%Y-%m-%d")
+
     if logs[user_id]["last_request_date"] != today:
-        logs[user_id]["requests_today"] = 0
+        logs[user_id]["requests_today_pdf"] = 0
         logs[user_id]["last_request_date"] = today
 
-    if logs[user_id]["requests_today"] >= REQUEST_LIMIT:
-        bot.send_message(message.chat.id,
-                         "❌ Вы достигли лимита запросов (20 в день). Пишите на potyy@ya.ru для увеличения.")
+    if logs[user_id]["requests_today_pdf"] >= REQUEST_LIMIT_pdf:
+        await message.answer("❌ Ваш сегодняшний лимит исчерпан.")
         return
 
-    logs[user_id]["requests_today"] += 1
-    save_logs(logs)
+    if user_id not in ADMIN_IDS:
+        logs[user_id]["requests_today_pdf"] += 1
+        save_logs(logs)
 
-    document = message.document
-    file_info = bot.get_file(document.file_id)
-    file_path = file_info.file_path
-    downloaded_file = bot.download_file(file_path)
-
+    file_id = message.document.file_id
+    file = await bot.get_file(file_id)
+    file_path = file.file_path
+    downloaded_file = await bot.download_file(file_path)
     temp_pdf_path = f"temp_{user_id}.pdf"
+
     with open(temp_pdf_path, "wb") as f:
-        f.write(downloaded_file)
+        f.write(downloaded_file.read())
 
     try:
         with open(temp_pdf_path, "rb") as f:
             reader = PyPDF2.PdfReader(f)
             text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
 
-        sent_message = bot.send_message(message.chat.id, "📄 Анализы загружены. Обрабатываю данные...")
-        result_text = f"{gigachat(text)}"
-        bot.delete_message(message.chat.id, sent_message.message_id)
-        send_message(message, result_text)
+        await message.answer("📄 Документ загружен. Обрабатываю данные...")
+        result_text = f"{gigachat(text, load_prompt())}"
+        await message.answer(refact_res_mes(result_text))
     except Exception as e:
-        bot.send_message(message.chat.id, "❌ Ошибка обработки PDF. Попробуйте другой файл.")
+        await message.answer("❌ Ошибка обработки PDF. Попробуйте другой файл.")
         logging.error(f"Ошибка чтения PDF: {e}")
-
     finally:
         os.remove(temp_pdf_path)
 
 
-# Обработчик текстовых данных
-@bot.message_handler(content_types=["text"])
-def handle_text(message):
+@dp.message(F.text)
+async def handle_text(message: types.Message):
     user_id = str(message.from_user.id)
     logs = load_logs()
-
     today = datetime.datetime.now().strftime("%Y-%m-%d")
+
     if logs[user_id]["last_request_date"] != today:
-        logs[user_id]["requests_today"] = 0
+        logs[user_id]["requests_today_mes"] = 0
         logs[user_id]["last_request_date"] = today
 
-    if logs[user_id]["requests_today"] >= REQUEST_LIMIT:
-        bot.send_message(message.chat.id,
-                         "❌ Вы достигли лимита запросов (20 в день). Пишите на potyy@ya.ru для увеличения.")
+    if logs[user_id]["requests_today_mes"] >= REQUEST_LIMIT_mes:
+        await message.answer("❌ Ваш сегодняшний лимит исчерпан.")
         return
 
-    logs[user_id]["requests_today"] += 1
-    save_logs(logs)
+    if user_id not in ADMIN_IDS:
+        logs[user_id]["requests_today_mes"] += 1
+        save_logs(logs)
 
-    sent_message = bot.send_message(message.chat.id, "📄 Обрабатываю данные...")
-    result_text = f"{gigachat(text=message.text)}"
-    bot.delete_message(message.chat.id, sent_message.message_id)
-    send_message(message, result_text)
-
-
-# Запуск бота
-if __name__ == "__main__":
-    bot.polling(none_stop=True)
+    await message.answer("📄 Обрабатываю данные...")
+    result_text = f"{gigachat(text=message.text, prompt=load_prompt())}"
+    await message.answer(refact_res_mes(result_text))
 
 
+async def main():
+    while True:
+        try:
+            await dp.start_polling(bot)
+        except Exception as e:
+            print(f"Ошибка: {e}, перезапуск через 10 секунд...")
+            time.sleep(10)
 
-
-
-
-
-# import os
-# import json
-# import logging
-# import datetime
-# import asyncio
-# from aiogram import Bot, Dispatcher, types
-# from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-# from aiogram.filters import Command
-# from aiogram.fsm.context import FSMContext
-# from aiogram.fsm.storage.memory import MemoryStorage
-# from aiogram.client.default import DefaultBotProperties
-# from aiogram.filters import StateFilter
-# from dotenv import load_dotenv
-# import PyPDF2
-# from gigachat import GigaChat
-#
-# load_dotenv()
-# TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-# API_KEY = os.getenv("API_KEY")
-# LOG_FILE = "requests_log.json"
-# REQUEST_LIMIT = 20
-# ADMIN_IDS = {'696933310'}
-#
-# logging.basicConfig(level=logging.INFO)
-#
-# bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
-# dp = Dispatcher(storage=MemoryStorage())
-#
-#
-# # Функция загрузки логов
-# async def load_logs():
-#     if os.path.exists(LOG_FILE):
-#         async with aiofiles.open(LOG_FILE, "r", encoding="utf-8") as f:
-#             return json.loads(await f.read())
-#     return {}
-#
-#
-# # Функция сохранения логов
-# async def save_logs(logs):
-#     async with aiofiles.open(LOG_FILE, "w", encoding="utf-8") as f:
-#         await f.write(json.dumps(logs, indent=4, ensure_ascii=False))
-#
-#
-# # Клавиатура для админа
-# # def admin_keyboard():
-# #     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, keyb)
-# #     keyboard.row("📊 Отправить файл со статистикой", "📢 Отправить сообщение всем пользователям")
-# #     return keyboard
-#
-# def admin_keyboard():
-#     keyboard = [
-#         [KeyboardButton(text="📊 Отправить файл со статистикой")],
-#         [KeyboardButton(text="📢 Отправить сообщение всем пользователям")],
-#     ]
-#     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
-#
-#
-# # Функция взаимодействия с GigaChat
-# async def gigachat(text):
-#     current_dir = os.path.dirname(os.path.abspath(__file__))  # Получаем текущую папку скрипта
-#     ca_bundle_file = os.path.join(current_dir, "russian_trusted_root_ca.cer")
-#     prompt = ("Ты — эксперт по медицинским анализам. "
-#               "Твоя задача — анализировать результаты анализов и выдавать понятные "
-#               "разъяснения. Твои ответы должны быть краткими, но информативными.")
-#     full_text = prompt + text
-#     with GigaChat(credentials=API_KEY, ca_bundle_file=ca_bundle_file) as giga:
-#         response = giga.chat(full_text)
-#         return response.choices[0].message.content
-#
-# @dp.message(Command("start"))
-# async def send_welcome(message: types.Message):
-#     user_id = str(message.from_user.id)
-#     logs = await load_logs()
-#
-#     if user_id not in logs:
-#         logs[user_id] = {"requests_today": 0, "last_request_date": ""}
-#     await save_logs(logs)
-#
-#     text = ("✨ Доброго времени суток, друзья! ✨\n\n"
-#             "🤖 Меня зовут *AnalysisObpproBot*.\n"
-#             "Я помогу расшифровать ваши анализы и объяснить результаты простым языком.\n\n"
-#             "📄 *Как воспользоваться ботом?*\n"
-#             "🔹 Прикрепите PDF-файл с анализами или вставьте результаты в чат.\n"
-#             "🔹 Я проанализирую их и предоставлю информационную справку.\n\n"
-#             "⚠ *Важно!* ⚠\n"
-#             "Этот бот не заменяет врача и предоставляет только информационные сведения.\n"
-#             "💬 История переписки *не сохраняется* и остаётся только в вашем диалоговом окне.")
-#
-#     if user_id in ADMIN_IDS:
-#         await message.answer("🔹 *Добро пожаловать в админ-панель!*", reply_markup=admin_keyboard())
-#     await message.answer(text)
-#
-#
-# @dp.message(lambda message: message.text == "📊 Отправить файл со статистикой")
-# async def send_logs(message: types.Message):
-#     if str(message.from_user.id) in ADMIN_IDS:
-#         if os.path.exists(LOG_FILE):
-#             await message.answer_document(types.FSInputFile(LOG_FILE))
-#         else:
-#             await message.answer("❌ Файл статистики не найден.")
-#     else:
-#         await message.answer("⛔ У вас нет прав доступа!")
-#
-#
-# @dp.message(lambda message: message.text == "📢 Отправить сообщение всем пользователям")
-# async def request_broadcast_message(message: types.Message, state: FSMContext):
-#     if str(message.from_user.id) in ADMIN_IDS:
-#         await message.answer("🔑 Введите сообщение для рассылки всем пользователям:")
-#         await state.set_state("broadcast")
-#     else:
-#         await message.answer("⛔ У вас нет прав доступа!")
-#
-#
-# @dp.message(Command("broadcast"))
-# async def send_broadcast(message: types.Message, state: FSMContext):
-#     logs_dict = await load_logs()
-#     broadcast_message = message.text.strip()
-#     sent_count = 0
-#
-#     for user_id in logs_dict:
-#         try:
-#             await bot.send_message(user_id, f"📢 *Сообщение от администратора:*\n\n{broadcast_message}")
-#             sent_count += 1
-#         except Exception as e:
-#             logging.info(f"Не удалось отправить сообщение {user_id}: {e}")
-#     await message.answer(f"✅ Сообщение отправлено {sent_count} пользователям.")
-#     await state.clear()
-#
-#
-# @dp.message(lambda message: message.document)
-# async def handle_pdf(message: types.Message):
-#     user_id = str(message.from_user.id)
-#     logs = await load_logs()
-#     today = datetime.datetime.now().strftime("%Y-%m-%d")
-#
-#     if logs[user_id]["last_request_date"] != today:
-#         logs[user_id]["requests_today"] = 0
-#         logs[user_id]["last_request_date"] = today
-#
-#     if logs[user_id]["requests_today"] >= REQUEST_LIMIT:
-#         await message.answer("❌ Вы достигли лимита запросов (20 в день). Пишите на potyy@ya.ru для увеличения.")
-#         return
-#
-#     logs[user_id]["requests_today"] += 1
-#     await save_logs(logs)
-#
-#     document = message.document
-#     file = await bot.download(document)
-#
-#     with open(f"temp_{user_id}.pdf", "wb") as f:
-#         f.write(file.read())
-#
-#     try:
-#         with open(f"temp_{user_id}.pdf", "rb") as f:
-#             reader = PyPDF2.PdfReader(f)
-#             text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-#
-#         await message.answer("📄 Анализы загружены. Обрабатываю данные...")
-#         result_text = f"🔎 Расшифровка анализов:\n\n{await gigachat(text)}...\n\nБЛАГОДАРИМ ЗА ДОВЕРИЕ!"
-#         await message.answer(result_text)
-#
-#     except Exception as e:
-#         await message.answer("❌ Ошибка обработки PDF. Попробуйте другой файл.")
-#         logging.error(f"Ошибка чтения PDF: {e}")
-#
-#     finally:
-#         os.remove(f"temp_{user_id}.pdf")
-#
-#
-# async def main():
-#     await dp.start_polling(bot)
-#
-#
-# if __name__ == "__main__":
-#     asyncio.run(main())
-
-
-
+asyncio.run(main())
