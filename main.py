@@ -49,7 +49,7 @@ async def send_welcome(message: types.Message):
         await message.answer("✨ADMIN панель доступна!✨", reply_markup=admin_keyboard())
 
     if user_id not in logs:
-        logs[user_id] = {"requests_today_mes": 0, "requests_today_pdf": 0, "last_request_date": ""}
+        logs[user_id] = {"Username": message.from_user.username, "requests_today_mes": 0, "requests_today_pdf": 0, "last_request_date": ""}
     save_logs(logs)
 
     text = ("✨ Доброго времени суток, друзья! ✨\n\n"
@@ -98,7 +98,6 @@ async def change_prompt(message: types.Message):
     markup = InlineKeyboardBuilder()
     markup.button(text="✅ Да", callback_data="confirm_prompt")
     markup.button(text="🚫 Отмена", callback_data="cancel_prompt")
-
 
     await message.answer(text=f"✅Установленный промпт:\n{load_prompt()}\n\nХотите изменить его?", reply_markup=markup.as_markup())
 
@@ -177,6 +176,9 @@ async def handle_pdf(message: types.Message):
     logs = load_logs()
     today = datetime.datetime.now().strftime("%Y-%m-%d")
 
+    if user_id not in logs:
+        logs[user_id] = {"Username": message.from_user.username, "requests_today_mes": 0, "requests_today_pdf": 0, "last_request_date": ""}
+
     if logs[user_id]["last_request_date"] != today:
         logs[user_id]["requests_today_pdf"] = 0
         logs[user_id]["last_request_date"] = today
@@ -185,9 +187,12 @@ async def handle_pdf(message: types.Message):
         await message.answer("❌ Ваш сегодняшний лимит исчерпан.")
         return
 
+    if not logs[user_id]['Username']:
+        logs[user_id]['Username'] = message.from_user.username
+
     if user_id not in ADMIN_IDS:
         logs[user_id]["requests_today_pdf"] += 1
-        save_logs(logs)
+    save_logs(logs)
 
     file_id = message.document.file_id
     file = await bot.get_file(file_id)
@@ -219,6 +224,9 @@ async def handle_text(message: types.Message):
     logs = load_logs()
     today = datetime.datetime.now().strftime("%Y-%m-%d")
 
+    if user_id not in logs:
+        logs[user_id] = {"Username": message.from_user.username, "requests_today_mes": 0, "requests_today_pdf": 0, "last_request_date": ""}
+
     if logs[user_id]["last_request_date"] != today:
         logs[user_id]["requests_today_mes"] = 0
         logs[user_id]["last_request_date"] = today
@@ -227,9 +235,12 @@ async def handle_text(message: types.Message):
         await message.answer("❌ Ваш сегодняшний лимит исчерпан.")
         return
 
+    if not logs[user_id]['Username']:
+        logs[user_id]['Username'] = message.from_user.username
+
     if user_id not in ADMIN_IDS:
         logs[user_id]["requests_today_mes"] += 1
-        save_logs(logs)
+    save_logs(logs)
 
     await message.answer("📄 Обрабатываю данные...")
     result_text = f"{gigachat(text=message.text, prompt=load_prompt())}"

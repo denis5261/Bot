@@ -4,6 +4,7 @@ from gigachat import GigaChat
 
 from settings import LOG_FILE
 
+
 def load_logs():
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, "r", encoding="utf-8") as f:
